@@ -23,7 +23,7 @@ struct MFCCommand: ParsableCommand {
             let c = MFCHelperClient()
             print("Connected to com.crystalidea.macsfancontrol.smcwrite. Sending open...")
             try c.open()
-            print("open OK — helper accepted our connection.")
+            print("open OK. Helper accepted our connection.")
             try c.close()
             print("close OK.")
         }

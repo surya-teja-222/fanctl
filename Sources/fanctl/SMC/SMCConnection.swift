@@ -8,8 +8,8 @@ import IOKit
 //   off  size  field
 //     0     4  key (FourCC)
 //    28     4  keyInfo.dataSize (UInt32)
-//    32     4  keyInfo.dataType (FourCC)  — must be zero on write or the
-//                                            kernel silently no-ops the call
+//    32     4  keyInfo.dataType (FourCC). Must be zero on write, or the
+//                                          kernel silently no-ops the call.
 //    36     1  keyInfo.dataAttributes (UInt8)
 //    40     1  result
 //    41     1  status
@@ -139,8 +139,8 @@ final class SMCConnection {
 
     // MARK: - Public API
 
-    /// Returns metadata (size + type) for an SMC key. Cached after first lookup
-    /// — keyInfo is static per boot.
+    /// Returns metadata (size + type) for an SMC key. Cached after first lookup;
+    /// keyInfo is static per boot.
     func keyInfo(key: String) throws -> SMCKeyInfo {
         if let cached = infoCache[key] { return cached }
         let keyCode = try FourCC.encode(key)
@@ -202,7 +202,7 @@ final class SMCConnection {
     }
 
     /// Writes raw bytes to a key. The dataType slot at offset 32 must remain
-    /// zero — the kernel rejects writes that set it.
+    /// zero; the kernel rejects writes that set it.
     func writeBytes(key: String, data: [UInt8]) throws {
         let info = try keyInfo(key: key)
         guard data.count == Int(info.dataSize) else {

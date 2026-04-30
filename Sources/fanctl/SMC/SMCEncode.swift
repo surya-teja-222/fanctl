@@ -1,6 +1,6 @@
 import Foundation
 
-// Encoding side of the payload codec — symmetric with SMCValue.decode.
+// Encoding side of the payload codec. Symmetric with SMCValue.decode.
 // Apple Silicon stores multi-byte payloads in host byte order (LE on arm64).
 
 enum SMCEncode {

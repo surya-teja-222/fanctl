@@ -16,7 +16,7 @@ struct ListCommand: ParsableCommand {
     @Flag(name: .long, help: "Also print the live decoded value for each key.")
     var values: Bool = false
 
-    @Flag(name: .long, help: "Names only — skip type/size lookup (much faster).")
+    @Flag(name: .long, help: "Names only. Skip type/size lookup (much faster).")
     var fast: Bool = false
 
     func run() throws {

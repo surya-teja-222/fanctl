@@ -7,9 +7,9 @@ struct EnumeratedKey {
 
 enum KeyEnumerator {
     /// Walks all SMC keys via READ_INDEX, optionally filtered. With `withInfo:
-    /// true`, fetches keyInfo per key — needed for typed display, slower for
-    /// large enumerations. With `false`, callers can lazily fetch info via
-    /// `smc.keyInfo(key:)` (cached).
+    /// true`, fetches keyInfo per key (needed for typed display, slower for
+    /// large enumerations). With `false`, callers can lazily fetch info via
+    /// `smc.keyInfo(key:)` which is cached.
     static func all(smc: SMCConnection,
                     matching: ((String) -> Bool)? = nil,
                     withInfo: Bool = true) throws -> [EnumeratedKey] {
