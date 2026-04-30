@@ -35,6 +35,21 @@ sudo visudo -f /etc/sudoers.d/fanctl
 # yourname ALL=(root) NOPASSWD: /usr/local/bin/fanctl
 ```
 
+## Run in the background (LaunchDaemon)
+
+`fanctl watch` runs a temperature curve loop. To run it always, install the bundled LaunchDaemon. It auto-starts at boot, restarts on crash, and logs to `/var/log/fanctl.log`.
+
+```sh
+sudo make install         # builds + installs binary
+sudo make install-daemon  # installs and starts the daemon
+tail -f /var/log/fanctl.log
+
+# stop:
+sudo make uninstall-daemon
+```
+
+The daemon uses `--preset cool`. Edit `launchd/dev.fanctl.watch.plist` to change presets or pass `--curve` directly, then re-run `sudo make install-daemon`.
+
 ## Why MFC
 
 Apple Silicon's kernel silently no-ops `AppleSMC` writes from regular processes, even as root. Reads work fine. We piggyback on Macs Fan Control's privileged helper via XPC, which already has the working write path.

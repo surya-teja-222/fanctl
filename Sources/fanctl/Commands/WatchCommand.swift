@@ -47,6 +47,12 @@ struct WatchCommand: ParsableCommand {
     var verbose: Bool = false
 
     func run() throws {
+        // Swift's stdout switches to block-buffering when not a tty (e.g. when
+        // launchd redirects to a file). Force line-buffering so per-tick logs
+        // land immediately in /var/log/fanctl.log.
+        setvbuf(stdout, nil, _IOLBF, 0)
+        setvbuf(stderr, nil, _IOLBF, 0)
+
         let smc = try SMCConnection()
         let fc = FanController(smc: smc)
         let fanCount = try fc.count()
