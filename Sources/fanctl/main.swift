@@ -8,6 +8,7 @@ struct Fanctl: ParsableCommand {
         subcommands: [
             ListCommand.self, GetCommand.self, TempsCommand.self,
             SetCommand.self, FanCommand.self, MFCCommand.self,
+            WatchCommand.self,
         ]
     )
 }
