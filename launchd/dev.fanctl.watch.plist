@@ -11,6 +11,10 @@
         <string>watch</string>
         <string>--preset</string>
         <string>cool</string>
+        <string>--interval</string>
+        <string>10</string>
+        <string>--step-rpm</string>
+        <string>500</string>
     </array>
 
     <key>RunAtLoad</key>
