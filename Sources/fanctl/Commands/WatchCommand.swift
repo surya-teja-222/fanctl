@@ -19,8 +19,10 @@ struct WatchCommand: ParsableCommand {
         abstract: "Continuously match fan RPM to a temperature curve.",
         discussion: """
         Polls all temperature sensors every --interval seconds, picks the max,
-        and sets all fans to the curve's RPM at that temperature. Releases
-        fans to firmware-managed mode when temp drops below the lowest pivot.
+        feeds it through an EMA smoother, and slews fan RPM gradually toward
+        the curve's target — both up and down. Releases fans to firmware-managed
+        mode only after RPM has ramped down to --start-rpm and temperature has
+        dropped --release-hysteresis °C below the lowest pivot.
 
         Presets:
           cool        50:2500,65:4500,80:max   (recommended for "always cool")
@@ -40,8 +42,17 @@ struct WatchCommand: ParsableCommand {
     @Option(name: .long, help: "Poll interval (seconds).")
     var interval: Double = 5
 
-    @Option(name: .long, help: "Skip a write if the new RPM differs from the current target by less than this.")
-    var hysteresis: Double = 200
+    @Option(name: .long, help: "Max RPM change per tick. Lower = smoother and quieter, but slower thermal response.")
+    var stepRpm: Double = 250
+
+    @Option(name: .long, help: "RPM floor when first engaging forced mode and the value to ramp down to before releasing to auto.")
+    var startRpm: Double = 1000
+
+    @Option(name: .long, help: "Stay in forced mode until smoothed temp drops this many °C below the lowest pivot before releasing.")
+    var releaseHysteresis: Double = 5
+
+    @Option(name: .long, help: "EMA smoothing factor for temperature, 0..1. Lower = smoother, slower. 1.0 = no smoothing.")
+    var smoothing: Double = 0.4
 
     @Flag(name: .long, help: "Print every tick, not just transitions.")
     var verbose: Bool = false
@@ -52,6 +63,13 @@ struct WatchCommand: ParsableCommand {
         // land immediately in /var/log/fanctl.log.
         setvbuf(stdout, nil, _IOLBF, 0)
         setvbuf(stderr, nil, _IOLBF, 0)
+
+        guard smoothing > 0, smoothing <= 1 else {
+            throw ValidationError("--smoothing must be in (0, 1].")
+        }
+        guard stepRpm > 0 else {
+            throw ValidationError("--step-rpm must be positive.")
+        }
 
         let smc = try SMCConnection()
         let fc = FanController(smc: smc)
@@ -73,7 +91,11 @@ struct WatchCommand: ParsableCommand {
         let runtime = WatchRuntime(
             smc: smc, fc: fc, fanCount: fanCount,
             curve: parsed, sensors: sensors,
-            hysteresis: hysteresis, verbose: verbose
+            stepRpm: stepRpm,
+            startRpm: startRpm,
+            releaseHysteresis: releaseHysteresis,
+            smoothing: smoothing,
+            verbose: verbose
         )
         WatchRuntime.shared = runtime
 
@@ -81,7 +103,7 @@ struct WatchCommand: ParsableCommand {
         let sigterm = installSignalHandler(SIGTERM)
         _ = sigint; _ = sigterm   // retain for the lifetime of run()
 
-        print("fanctl watch  curve=\(spec)  fans=\(fanCount)  sensors=\(sensors.count)  interval=\(Int(interval))s")
+        print("fanctl watch  curve=\(spec)  fans=\(fanCount)  sensors=\(sensors.count)  interval=\(Int(interval))s  step=\(Int(stepRpm))  start=\(Int(startRpm))  release-hyst=\(releaseHysteresis)°C  smoothing=\(smoothing)")
         print("Ctrl-C to release and exit.\n")
 
         runtime.tick()
@@ -129,68 +151,124 @@ final class WatchRuntime {
     private let fanCount: Int
     private let curve: FanCurve
     private let sensors: [String]
-    private let hysteresis: Double
+    private let stepRpm: Double
+    private let startRpm: Double
+    private let releaseHysteresis: Double
+    private let smoothing: Double
     private let verbose: Bool
+    private let lowestPivot: Double
 
-    private var lastTarget: Double?
-    private var lastWasAuto = true
+    // nil = fans are released to firmware auto. Non-nil = last RPM we forced.
+    private var currentRPM: Double?
+    private var smoothedTemp: Double?
 
     init(smc: SMCConnection, fc: FanController, fanCount: Int,
-         curve: FanCurve, sensors: [String], hysteresis: Double, verbose: Bool) {
+         curve: FanCurve, sensors: [String],
+         stepRpm: Double, startRpm: Double,
+         releaseHysteresis: Double, smoothing: Double, verbose: Bool) {
         self.smc = smc
         self.fc = fc
         self.fanCount = fanCount
         self.curve = curve
         self.sensors = sensors
-        self.hysteresis = hysteresis
+        self.stepRpm = stepRpm
+        self.startRpm = startRpm
+        self.releaseHysteresis = releaseHysteresis
+        self.smoothing = smoothing
         self.verbose = verbose
+        self.lowestPivot = curve.pivots.first?.temp ?? 0
     }
 
     func tick() {
-        var maxTemp = -Double.infinity
+        var rawMax = -Double.infinity
         for name in sensors {
             guard let (info, data) = try? smc.readBytes(key: name),
                   let d = SMCValue.decode(type: info.dataType, bytes: data).asDouble,
                   d > -50, d < 120 else { continue }
-            if d > maxTemp { maxTemp = d }
+            if d > rawMax { rawMax = d }
         }
-        guard maxTemp > -Double.infinity else {
+        guard rawMax > -Double.infinity else {
             if verbose { log("no temps available this tick") }
             return
         }
 
-        switch curve.evaluate(temp: maxTemp) {
-        case .auto:
-            if !lastWasAuto {
-                writeAll { try fc.auto(id: $0) }
-                lastWasAuto = true
-                lastTarget = nil
-                log(String(format: "%.1f°C → auto (released)", maxTemp))
-            } else if verbose {
-                log(String(format: "%.1f°C → auto", maxTemp))
-            }
+        let temp: Double
+        if let prev = smoothedTemp {
+            temp = smoothing * rawMax + (1 - smoothing) * prev
+        } else {
+            temp = rawMax
+        }
+        smoothedTemp = temp
 
-        case .rpm(let target):
-            let needWrite = lastWasAuto
-                || lastTarget == nil
-                || abs(target - (lastTarget ?? 0)) > hysteresis
-            if needWrite {
-                writeAll { try fc.force(id: $0, rpm: target) }
-                lastWasAuto = false
-                lastTarget = target
-                log(String(format: "%.1f°C → %d RPM", maxTemp, Int(target)))
-            } else if verbose {
-                log(String(format: "%.1f°C → %d (holding %d)", maxTemp, Int(target), Int(lastTarget!)))
-            }
+        switch curve.evaluate(temp: temp) {
+        case .auto:
+            handleAutoTarget(temp: temp, rawMax: rawMax)
+        case .rpm(let curveTarget):
+            handleRpmTarget(curveTarget, temp: temp, rawMax: rawMax)
+        }
+    }
+
+    private func handleAutoTarget(temp: Double, rawMax: Double) {
+        guard let cur = currentRPM else {
+            if verbose { logTemp(temp, rawMax, "auto (idle)") }
+            return
+        }
+        // Ramp down toward startRpm; release once we reach the floor and the
+        // smoothed temp confirms we're well below the lowest pivot.
+        let next = max(cur - stepRpm, startRpm)
+        if next <= startRpm && temp < lowestPivot - releaseHysteresis {
+            writeAll { try fc.auto(id: $0) }
+            currentRPM = nil
+            logTemp(temp, rawMax, "released to auto from \(Int(cur)) RPM")
+            return
+        }
+        if next != cur {
+            writeAll { try fc.force(id: $0, rpm: next) }
+            currentRPM = next
+            logTemp(temp, rawMax, "ramping down \(Int(cur)) → \(Int(next)) RPM")
+        } else if verbose {
+            logTemp(temp, rawMax, "holding \(Int(cur)) RPM (waiting for temp to drop below \(Int(lowestPivot - releaseHysteresis))°C)")
+        }
+    }
+
+    private func handleRpmTarget(_ curveTarget: Double, temp: Double, rawMax: Double) {
+        guard let cur = currentRPM else {
+            // First crossing into the curve — start gentle at startRpm.
+            let initial = min(startRpm, curveTarget)
+            writeAll { try fc.force(id: $0, rpm: initial) }
+            currentRPM = initial
+            logTemp(temp, rawMax, "engaging at \(Int(initial)) RPM (curve wants \(Int(curveTarget)))")
+            return
+        }
+        let next: Double
+        if cur < curveTarget {
+            next = min(cur + stepRpm, curveTarget)
+        } else if cur > curveTarget {
+            next = max(cur - stepRpm, curveTarget)
+        } else {
+            next = cur
+        }
+        if next != cur {
+            writeAll { try fc.force(id: $0, rpm: next) }
+            currentRPM = next
+            let arrow = next > cur ? "↑" : "↓"
+            logTemp(temp, rawMax, "\(arrow) \(Int(cur)) → \(Int(next)) RPM (target \(Int(curveTarget)))")
+        } else if verbose {
+            logTemp(temp, rawMax, "holding \(Int(cur)) RPM (at target)")
         }
     }
 
     func releaseAll() {
         writeAll { try fc.auto(id: $0) }
+        currentRPM = nil
     }
 
     private func writeAll(_ op: (Int) throws -> Void) {
         for i in 0..<fanCount { _ = try? op(i) }
+    }
+
+    private func logTemp(_ smoothed: Double, _ raw: Double, _ msg: String) {
+        log(String(format: "%.1f°C (raw %.1f) → %@", smoothed, raw, msg))
     }
 
     private func log(_ msg: String) {
