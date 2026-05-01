@@ -157,6 +157,7 @@ final class WatchRuntime {
     private let smoothing: Double
     private let verbose: Bool
     private let lowestPivot: Double
+    private let highestPivot: Double
 
     // nil = fans are released to firmware auto. Non-nil = last RPM we forced.
     private var currentRPM: Double?
@@ -177,6 +178,7 @@ final class WatchRuntime {
         self.smoothing = smoothing
         self.verbose = verbose
         self.lowestPivot = curve.pivots.first?.temp ?? 0
+        self.highestPivot = curve.pivots.last?.temp ?? 100
     }
 
     func tick() {
@@ -233,11 +235,19 @@ final class WatchRuntime {
 
     private func handleRpmTarget(_ curveTarget: Double, temp: Double, rawMax: Double) {
         guard let cur = currentRPM else {
-            // First crossing into the curve — start gentle at startRpm.
-            let initial = min(startRpm, curveTarget)
+            // Engaging from auto. Pick the initial RPM proportional to how
+            // deep into the curve we are: at the cold boundary, start gentle
+            // at startRpm; near the hot ceiling, jump straight to curveTarget
+            // so we don't crawl while temps are already high.
+            let span = max(1, highestPivot - lowestPivot)
+            let fraction = max(0, min(1, (temp - lowestPivot) / span))
+            let initial = max(min(startRpm, curveTarget),
+                              startRpm + fraction * (curveTarget - startRpm))
             writeAll { try fc.force(id: $0, rpm: initial) }
             currentRPM = initial
-            logTemp(temp, rawMax, "engaging at \(Int(initial)) RPM (curve wants \(Int(curveTarget)))")
+            logTemp(temp, rawMax,
+                    String(format: "engaging at %d RPM (curve wants %d, depth %.0f%%)",
+                           Int(initial), Int(curveTarget), fraction * 100))
             return
         }
         let next: Double
